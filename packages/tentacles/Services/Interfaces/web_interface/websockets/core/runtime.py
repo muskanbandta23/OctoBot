@@ -1,4 +1,4 @@
-#  Drakkar-Software OctoBot-Interfaces
+#  Drakkar-Software OctoBot-Tentacles
 #  Copyright (c) Drakkar-Software, All rights reserved.
 #
 #  This library is free software; you can redistribute it and/or
@@ -13,30 +13,28 @@
 #
 #  You should have received a copy of the GNU Lesser General Public
 #  License along with this library.
-import gc
-import pytest
 
-import octobot_services.util
-
-# ensure that imports that might be conflicting are importable
+import asyncio
 
 
-def test_web_imports():
-    import flask
-    import uvicorn
-    import asgiref.wsgi
-    import starlette
-    import flask_login
-    import wtforms
-    import flask_wtf
+_web_loop: asyncio.AbstractEventLoop | None = None
 
 
-def test_telegram_imports():
-    import telegram
+def set_web_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _web_loop
+    _web_loop = loop
 
 
-def test_openai_imports():
-    import openai
-    # ensure openai lib mocks don't crash when calling isinstance on them
-    for obj in gc.get_objects():
-        isinstance(obj, str)
+def get_web_loop() -> asyncio.AbstractEventLoop:
+    if _web_loop is None:
+        raise RuntimeError("Web interface WebSocket loop is not initialized")
+    return _web_loop
+
+
+def clear_web_loop() -> None:
+    global _web_loop
+    _web_loop = None
+
+
+def try_get_web_loop() -> asyncio.AbstractEventLoop | None:
+    return _web_loop

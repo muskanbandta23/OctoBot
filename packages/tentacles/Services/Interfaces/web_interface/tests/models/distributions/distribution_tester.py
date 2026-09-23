@@ -15,12 +15,27 @@
 #  License along with this library.
 import aiohttp
 import asyncio
+import contextlib
 
 import tentacles.Services.Interfaces.web_interface.tests as web_interface_tests
 import octobot.enums
 
 
 LOCAL_HOST_URL = "http://localhost:"
+
+
+async def _gather_all_page_checks(*awaitables):
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+
+@contextlib.asynccontextmanager
+async def _distribution_test_client_session():
+    connector = aiohttp.TCPConnector(force_close=True)
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=30)) as session:
+        yield session
 
 
 class AbstractDistributionTester:
@@ -37,8 +52,8 @@ class AbstractDistributionTester:
 
     async def _inner_test_browse_all_pages_no_required_password(self, black_list: list[str]):
         async with web_interface_tests.get_web_interface(False, self.DISTRIBUTION) as web_interface_instance:
-            async with aiohttp.ClientSession() as session:
-                await asyncio.gather(*[
+            async with _distribution_test_client_session() as session:
+                await _gather_all_page_checks(*[
                     web_interface_tests.check_page_no_login_redirect(self._get_rule_url(rule, web_interface_instance.port), session)
                     for rule in self._get_all_native_rules(web_interface_instance, black_list=black_list)
                 ])
@@ -48,8 +63,8 @@ class AbstractDistributionTester:
 
     async def _inner_test_browse_all_pages_required_password_without_login(self, black_list: list[str]):
         async with web_interface_tests.get_web_interface(True, self.DISTRIBUTION) as web_interface_instance:
-            async with aiohttp.ClientSession() as session:
-                await asyncio.gather(*[
+            async with _distribution_test_client_session() as session:
+                await _gather_all_page_checks(*[
                     web_interface_tests.check_page_login_redirect(self._get_rule_url(rule, web_interface_instance.port), session)
                     for rule in self._get_all_native_rules(web_interface_instance, black_list=black_list)
                 ])
@@ -61,23 +76,23 @@ class AbstractDistributionTester:
             self, auth_black_list: list[str], unauth_black_list: list[str]
     ):
         async with web_interface_tests.get_web_interface(True, self.DISTRIBUTION) as web_interface_instance:
-            async with aiohttp.ClientSession() as session:
+            async with _distribution_test_client_session() as session:
                 await web_interface_tests.login_user_on_session(session, web_interface_instance.port)
                 # correctly display pages: session is logged in
-                await asyncio.gather(*[
+                await _gather_all_page_checks(*[
                     web_interface_tests.check_page_no_login_redirect(self._get_rule_url(rule, web_interface_instance.port), session)
                     for rule in self._get_all_native_rules(web_interface_instance, black_list=auth_black_list)
                 ])
-            async with aiohttp.ClientSession() as unauthenticated_session:
+            async with _distribution_test_client_session() as unauthenticated_session:
                 # redirect to login page: session is not logged in
-                await asyncio.gather(*[
+                await _gather_all_page_checks(*[
                     web_interface_tests.check_page_login_redirect(self._get_rule_url(rule, web_interface_instance.port), unauthenticated_session)
                     for rule in self._get_all_native_rules(web_interface_instance, black_list=unauth_black_list)
                 ])
 
     async def test_logout(self):
         async with web_interface_tests.get_web_interface(True, self.DISTRIBUTION) as web_interface_instance:
-            async with aiohttp.ClientSession() as session:
+            async with _distribution_test_client_session() as session:
                 await web_interface_tests.login_user_on_session(session, web_interface_instance.port)
                 await web_interface_tests.check_page_no_login_redirect(
                     f"{LOCAL_HOST_URL}{web_interface_instance.port}/", session

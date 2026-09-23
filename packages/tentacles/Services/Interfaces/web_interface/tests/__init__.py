@@ -28,27 +28,24 @@ import octobot_commons.constants as commons_constants
 
 import octobot_services.interfaces as interfaces
 import octobot.community as community
-try:
-    import octobot.community.supabase_backend.configuration_storage as configuration_storage
-except ImportError:
-    # todo remove once supabase migration is complete
-    configuration_storage = mock.Mock(
-        ASyncConfigurationStorage=mock.Mock(
-            _save_value_in_config=mock.Mock()
-        )
-    )
 import octobot.automation as automation
 import octobot.enums
 import octobot_commons.constants
 
 import tentacles.Services.Interfaces.web_interface.controllers.octobot_authentication as octobot_authentication
-import tentacles.Services.Interfaces.web_interface.models as models
 import tentacles.Services.Interfaces.web_interface as web_interface
 
 
 PASSWORD = "123"
 MAX_START_TIME = 5
+WEB_INTERFACE_TEST_THREAD_JOIN_TIMEOUT_SECONDS = 15
 NON_AUTH_ROUTES = ["/api/", "robots.txt"]
+
+
+def _disable_configuration_save(
+    loaded_configuration: configuration.Configuration,
+) -> None:
+    loaded_configuration.save = lambda *_, **__: None  # type: ignore[method-assign]
 
 
 def get_new_port() -> int:
@@ -79,6 +76,7 @@ async def _init_bot(
     if configure_profile_storage is not None:
         configure_profile_storage(loaded_config.profile_storage)
     loaded_config.config[octobot_commons.constants.CONFIG_DISTRIBUTION] = distribution.value
+    _disable_configuration_save(loaded_config)
     bot = octobot.OctoBot(loaded_config)
     bot.initialized = True
     tentacles_config = config.load_test_tentacles_config()
@@ -113,35 +111,61 @@ async def get_web_interface(
     cleanup_tentacles_setup: typing.Callable | None = None,
 ):
     web_interface_instance = None
+    start_thread = None
     try:
-        with mock.patch.object(configuration_storage.SyncConfigurationStorage, "_save_value_in_config", mock.Mock()):
-            bot = await _init_bot(
-                distribution,
-                configure_profile_storage=configure_profile_storage,
-                configure_tentacles_setup=configure_tentacles_setup,
+        bot = await _init_bot(
+            distribution,
+            configure_profile_storage=configure_profile_storage,
+            configure_tentacles_setup=configure_tentacles_setup,
+        )
+        interfaces.AbstractInterface.bot_id = bot.bot_id
+        web_interface_instance = web_interface.WebInterface({})
+        web_interface_instance.port = get_new_port()
+        web_interface_instance.should_open_web_interface = False
+        web_interface_instance.set_requires_password(require_password)
+        web_interface_instance.password_hash = configuration.get_password_hash(PASSWORD)
+        first_exchange = next(iter(bot.config[commons_constants.CONFIG_EXCHANGES]))
+        with mock.patch.object(web_interface_instance, "_register_on_channels", new=mock.AsyncMock()), \
+             mock.patch(
+                 "tentacles.Services.Interfaces.web_interface.models.get_current_exchange",
+                 mock.Mock(return_value=first_exchange),
+             ):
+            start_thread = threading.Thread(
+                target=_start_web_interface,
+                args=(web_interface_instance,),
+                name="web-interface-test",
             )
-            interfaces.AbstractInterface.bot_id = bot.bot_id
-            web_interface_instance = web_interface.WebInterface({})
-            web_interface_instance.port = get_new_port()
-            web_interface_instance.should_open_web_interface = False
-            web_interface_instance.set_requires_password(require_password)
-            web_interface_instance.password_hash = configuration.get_password_hash(PASSWORD)
-            first_exchange = next(iter(bot.config[commons_constants.CONFIG_EXCHANGES]))
-            with mock.patch.object(web_interface_instance, "_register_on_channels", new=mock.AsyncMock()), \
-                 mock.patch.object(models, "get_current_exchange", mock.Mock(return_value=first_exchange)):
-                threading.Thread(target=_start_web_interface, args=(web_interface_instance,)).start()
-                # ensure web interface had time to start or it can't be stopped at the moment
-                launch_time = time.time()
-                while not web_interface_instance.started and time.time() - launch_time < MAX_START_TIME:
-                    await asyncio.sleep(0.3)
-                if not web_interface_instance.started:
-                    raise RuntimeError("Web interface did not start in time")
-                yield web_interface_instance
+            start_thread.start()
+            # ensure web interface had time to start or it can't be stopped at the moment
+            launch_time = time.time()
+            while not web_interface_instance.started and time.time() - launch_time < MAX_START_TIME:
+                await asyncio.sleep(0.3)
+            if not web_interface_instance.started:
+                raise RuntimeError("Web interface did not start in time")
+            yield web_interface_instance
     finally:
         if web_interface_instance is not None:
             await web_interface_instance.stop()
+        if start_thread is not None:
+            start_thread.join(timeout=WEB_INTERFACE_TEST_THREAD_JOIN_TIMEOUT_SECONDS)
+            if start_thread.is_alive():
+                raise RuntimeError("Web interface thread did not exit after stop")
         if cleanup_tentacles_setup is not None:
             cleanup_tentacles_setup()
+
+
+@contextlib.asynccontextmanager
+async def _aihttp_request(session, url):
+    import logging
+    logger = logging.getLogger("_aihttp_request")
+    try:
+        async with session.get(url) as resp:
+            yield resp
+    except Exception as e:
+        logger.info(f"EREROR {url=}: {resp.status=} {e}")
+        raise type(e)(f"{url=}: {e}") from e
+    finally:
+        logger.info(f"OK {url=}: {resp.status=}")
 
 
 async def check_page_no_login_redirect(url, session):
@@ -149,18 +173,18 @@ async def check_page_no_login_redirect(url, session):
         "login", "logout", "/profiles_selector",
         "/community"  # redirects
     ]
-    async with session.get(url) as resp:
+    async with _aihttp_request(session, url) as resp:
+        assert resp.status == 200, f"{resp.status=} != 200 ({url=})"
         text = await resp.text()
         assert "We are sorry, but an unexpected error occurred" not in text, f"{url=}"
         assert "We are sorry, but this doesn't exist" not in text, f"{url=}"
         if not (any(url.endswith(suffix)) for suffix in COMMUNITY_LOGIN_CONTAINED_PAGE_SUFFIXES):
             assert "input type=submit value=Login" not in text, f"{url=}"
             assert not resp.real_url.name == "login", f"{resp.real_url.name=} != 200 ({url=})"
-        assert resp.status == 200, f"{resp.status=} != 200 ({url=})"
 
 
 async def check_page_login_redirect(url, session):
-    async with session.get(url) as resp:
+    async with _aihttp_request(session, url) as resp:
         text = await resp.text()
         assert "We are sorry, but an unexpected error occurred" not in text, f"{url=}"
         assert "We are sorry, but this doesn't exist" not in text, f"{url=}"

@@ -1,4 +1,4 @@
-#  Drakkar-Software OctoBot-Interfaces
+#  Drakkar-Software OctoBot-Tentacles
 #  Copyright (c) Drakkar-Software, All rights reserved.
 #
 #  This library is free software; you can redistribute it and/or
@@ -13,30 +13,17 @@
 #
 #  You should have received a copy of the GNU Lesser General Public
 #  License along with this library.
-import gc
-import pytest
 
-import octobot_services.util
+import json
 
-# ensure that imports that might be conflicting are importable
+import tentacles.Services.Interfaces.web_interface.websockets.protocol.wire_protocol as wire_protocol
 
 
-def test_web_imports():
-    import flask
-    import uvicorn
-    import asgiref.wsgi
-    import starlette
-    import flask_login
-    import wtforms
-    import flask_wtf
+def recv_ws_event(websocket) -> dict:
+    frame = json.loads(websocket.receive_text())
+    assert "event" in frame
+    return frame
 
 
-def test_telegram_imports():
-    import telegram
-
-
-def test_openai_imports():
-    import openai
-    # ensure openai lib mocks don't crash when calling isinstance on them
-    for obj in gc.get_objects():
-        isinstance(obj, str)
+def send_ws_event(websocket, event: str, data=None) -> None:
+    websocket.send_text(wire_protocol.encode_ws_event(event, data))
